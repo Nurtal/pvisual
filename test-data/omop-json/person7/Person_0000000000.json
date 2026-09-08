@@ -1,0 +1,24 @@
+{
+  "Person": [
+    {
+      "person_id": "7",
+      "ethnicity_source_value": "hispanic",
+      "ethnicity_concept_id": "38003563",
+      "ethnicity_source_concept_id": "0",
+      "gender_source_value": "F",
+      "gender_concept_id": "8532",
+      "gender_source_concept_id": "0",
+      "race_source_value": "white",
+      "race_source_concept_id": "0",
+      "race_concept_id": "8527",
+      "location_id": "",
+      "provider_id": "",
+      "year_of_birth": "2000",
+      "month_of_birth": "05",
+      "day_of_birth": "04",
+      "state": "",
+      "zip": "",
+      "death_date": ""
+    }
+  ]
+}
