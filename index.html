@@ -1103,6 +1103,8 @@
         renderTimeline();
         renderRadial();
 
+        console.log('PatientData:', patientData);
+
         const totalMeasurements = patientData.visits.reduce((sum, v) => sum + v.measurements.length, 0);
         setStatus(
           'Patient ' + patientData.person.person_id +
