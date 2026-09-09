@@ -78,7 +78,6 @@
       min-height: 0;
     }
 
-    /* Radial visualization area */
     #radial-container {
       flex: 1;
       min-width: 0;
@@ -96,7 +95,6 @@
       user-select: none;
     }
 
-    /* Timeline sidebar */
     #timeline {
       width: var(--sidebar-width);
       flex-shrink: 0;
@@ -111,6 +109,121 @@
       color: var(--text-muted);
       font-size: 13px;
       text-align: center;
+    }
+
+    .timeline-entry {
+      padding: 10px 16px 10px 20px;
+      cursor: pointer;
+      border-left: 4px solid transparent;
+      transition: background 0.15s ease, border-color 0.15s ease;
+    }
+
+    .timeline-entry:hover { background: #f7f8fa; }
+
+    .timeline-entry.highlighted {
+      background: #eef6fb;
+      border-left-color: var(--accent);
+    }
+
+    .timeline-entry .concept-name {
+      font-size: 13px;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 280px;
+    }
+
+    .timeline-entry .value-unit {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+
+    .timeline-entry .date {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+
+    .timeline-entry { position: relative; }
+
+    .concept-legend {
+      padding: 8px 16px;
+      border-top: 1px solid var(--border);
+      margin-top: 8px;
+    }
+
+    .concept-legend-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+
+    .concept-legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      color: var(--text);
+      padding: 2px 0;
+    }
+
+    .concept-legend-swatch {
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+      flex-shrink: 0;
+    }
+
+    .scroll-ring-label {
+      font-size: 22px;
+      fill: var(--text-muted);
+      pointer-events: none;
+      text-anchor: middle;
+      dominant-baseline: central;
+    }
+
+    .node-info-panel {
+      position: absolute;
+      background: var(--panel-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 18px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+      pointer-events: auto;
+      opacity: 0;
+      transform: scale(0.95);
+      transition: opacity 0.25s ease, transform 0.25s ease;
+      z-index: 100;
+      max-width: 280px;
+      font-size: 13px;
+    }
+
+    .node-info-panel.visible {
+      opacity: 1;
+      transform: scale(1);
+    }
+
+    .node-info-panel .info-concept {
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+
+    .node-info-panel .info-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 3px 0;
+      color: var(--text-muted);
+      font-size: 12px;
+    }
+
+    .node-info-panel .info-row span:last-child {
+      font-weight: 500;
+      color: var(--text);
     }
 
     @media (max-width: 900px) {
@@ -129,6 +242,7 @@
     <main>
       <div id="radial-container">
         <svg id="radial-svg" role="img" aria-label="Radial visit visualization"></svg>
+        <div id="node-info" class="node-info-panel"></div>
       </div>
       <aside id="timeline" aria-label="Measurement timeline">
         <div class="timeline-empty">Load a directory of OMOP export files to see the measurement timeline.</div>
@@ -138,26 +252,886 @@
 
   <script src="https://d3js.org/d3.v7.min.js"></script>
   <script>
-    (function () {
-      'use strict';
+  (function () {
+    'use strict';
 
-      const statusEl = document.getElementById('status');
-      const loadBtn = document.getElementById('load-btn');
+    // ─── Constants ───────────────────────────────────────────────────────────
+    const MAX_VISIBLE_RINGS = 5;
+    const RING_SPACING = 60;
+    const CENTER_RADIUS = 32;
+    const NODE_RADIUS = 5;
+    const SVG_ID = 'radial-svg';
+    const TIMELINE_ID = 'timeline';
+    const INFO_ID = 'node-info';
+    const FILE_SIZE_LIMIT = 10 * 1024 * 1024;
+    const ACCENT_COLOR = '#1f8ac0';
 
-      function setStatus(text) {
-        statusEl.textContent = text;
+    const VISIT_COLORS = {
+      9201: '#3b6fd4',
+      9202: '#2e8b57',
+      9203: '#d4504e'
+    };
+
+    const VISIT_CONCEPT_NAMES = {
+      9201: 'Inpatient Visit',
+      9202: 'Outpatient Visit',
+      9203: 'Emergency Visit'
+    };
+
+    // ─── State ───────────────────────────────────────────────────────────────
+    let patientData = null;
+    let conceptColorMap = {};
+    let colorIndex = 0;
+    let currentVisibleStart = 0;
+    let highlightedVisitId = null;
+    let highlightedMeasurementId = null;
+    let expandedNode = null;
+
+    const statusEl = document.getElementById('status');
+    const loadBtn = document.getElementById('load-btn');
+    const svgEl = d3.select('#' + SVG_ID);
+    const timelineEl = document.getElementById(TIMELINE_ID);
+    const infoEl = document.getElementById(INFO_ID);
+
+    // ─── Helpers ─────────────────────────────────────────────────────────────
+    function setStatus(text) { statusEl.textContent = text; }
+
+    function getVisitColor(visitConceptId) {
+      const id = Number(visitConceptId);
+      return VISIT_COLORS[id] || '#888';
+    }
+
+    function getConceptColor(conceptId) {
+      const id = String(conceptId);
+      if (!conceptColorMap[id]) {
+        conceptColorMap[id] = d3.schemeTableau10[colorIndex % 10];
+        colorIndex++;
+      }
+      return conceptColorMap[id];
+    }
+
+    function truncate(str, len) {
+      return str.length > len ? str.slice(0, len) + '…' : str;
+    }
+
+    function computeAge(yearOfBirth, monthOfBirth, dayOfBirth, referenceDate) {
+      const birth = new Date(yearOfBirth, (monthOfBirth || 1) - 1, dayOfBirth || 1);
+      const ref = referenceDate || new Date();
+      let age = ref.getFullYear() - birth.getFullYear();
+      const m = ref.getMonth() - birth.getMonth();
+      if (m < 0 || (m === 0 && ref.getDate() < birth.getDate())) age--;
+      return age;
+    }
+
+    function formatDate(dateStr) {
+      if (!dateStr) return '—';
+      const d = new Date(dateStr);
+      return d.toLocaleDateString('en-CA');
+    }
+
+    // ─── Data Loading ────────────────────────────────────────────────────────
+    async function loadDirectory(dirHandle) {
+      const files = {};
+      for await (const entry of dirHandle.values()) {
+        if (entry.kind === 'file') {
+          const file = await entry.getFile();
+          if (file.size > FILE_SIZE_LIMIT) {
+            throw new Error('File exceeds 10MB limit: ' + file.name);
+          }
+          files[file.name.toLowerCase()] = file;
+        }
+      }
+      return files;
+    }
+
+    async function readJsonFile(file) {
+      const text = await file.text();
+      return JSON.parse(text);
+    }
+
+    async function readCsvFile(file) {
+      const text = await file.text();
+      const lines = text.split('\n').filter(l => l.trim());
+      if (lines.length < 2) return [];
+      const headers = parseCsvLine(lines[0]);
+      const rows = [];
+      for (let i = 1; i < lines.length; i++) {
+        const vals = parseCsvLine(lines[i]);
+        const obj = {};
+        headers.forEach((h, j) => { obj[h] = vals[j] || ''; });
+        rows.push(obj);
+      }
+      return rows;
+    }
+
+    function parseCsvLine(line) {
+      const result = [];
+      let current = '';
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (ch === '"') {
+          inQuotes = !inQuotes;
+        } else if (ch === ',' && !inQuotes) {
+          result.push(current.trim());
+          current = '';
+        } else {
+          current += ch;
+        }
+      }
+      result.push(current.trim());
+      return result;
+    }
+
+    // ─── Format Detection ────────────────────────────────────────────────────
+    async function detectFormat(files) {
+      // OMOP JSON detection: read any JSON and check for a top-level OMOP table key
+      for (const fname of Object.keys(files)) {
+        if (!fname.endsWith('.json')) continue;
+        try {
+          const text = await files[fname].text();
+          const obj = JSON.parse(text);
+          if (obj && (obj.Person || obj.Measurement || obj.Visit_Occurrence)) {
+            return 'omop-json';
+          }
+        } catch (e) {
+          // not a parseable JSON file; keep scanning
+        }
       }
 
-      if (window.d3) {
-        setStatus('D3.js ' + d3.version + ' ready. Load a directory to begin.');
-      } else {
-        setStatus('Error: D3.js failed to load from CDN. Check network connection.');
+      const csvFiles = Object.keys(files).filter(f => f.endsWith('.csv'));
+      if (csvFiles.includes('patients.csv') || csvFiles.includes('encounters.csv')) {
+        return 'synthea-csv';
       }
 
-      loadBtn.addEventListener('click', function () {
-        setStatus('Directory loading will be available in the next development step.');
+      return null;
+    }
+
+    // ─── OMOP JSON Loading & Normalization ───────────────────────────────────
+    async function loadOmopJson(files) {
+      const fileNames = Object.keys(files);
+      let personData = null;
+      let measurements = [];
+      let visits = [];
+
+      for (const fname of fileNames) {
+        if (!fname.endsWith('.json')) continue;
+        const data = await readJsonFile(files[fname]);
+        if (data.Person) {
+          personData = data.Person;
+        } else if (data.Measurement) {
+          measurements = measurements.concat(data.Measurement);
+        } else if (data.Visit_Occurrence) {
+          visits = visits.concat(data.Visit_Occurrence);
+        }
+      }
+
+      return normalizeOmopData(personData, measurements, visits);
+    }
+
+    function normalizeOmopData(personRows, measurementRows, visitRows) {
+      if (!personRows || personRows.length === 0) {
+        throw new Error('No Person data found in the selected directory.');
+      }
+
+      const person = personRows[0];
+      const personId = String(person.person_id);
+
+      const filteredMeasurements = measurementRows.filter(
+        m => String(m.person_id) === personId
+      );
+
+      let filteredVisits = visitRows.filter(
+        v => String(v.person_id) === personId
+      );
+
+      // Detect CDM version: v5.4 has visit_start_datetime
+      const hasDatetime = filteredVisits.some(v => v.visit_start_datetime);
+
+      // Sort visits by start_date descending (most recent first)
+      filteredVisits.sort((a, b) =>
+        new Date(b.visit_start_date) - new Date(a.visit_start_date)
+      );
+
+      // Group measurements by visit_occurrence_id
+      const visitMeasurementMap = {};
+      filteredMeasurements.forEach(m => {
+        const vid = String(m.visit_occurrence_id);
+        if (!visitMeasurementMap[vid]) visitMeasurementMap[vid] = [];
+        visitMeasurementMap[vid].push({
+          measurement_id: String(m.measurement_id),
+          measurement_concept_id: Number(m.measurement_concept_id),
+          measurement_concept_name: m.measurement_concept_name || m.measurement_concept_code || 'Unknown',
+          measurement_date: m.measurement_date,
+          value_as_number: m.value_as_number || '',
+          unit_source_value: m.unit_source_value || '',
+          value_source_value: m.value_source_value || ''
+        });
       });
-    })();
+
+      const normalizedVisits = filteredVisits.map(v => ({
+        visit_occurrence_id: String(v.visit_occurrence_id),
+        visit_concept_id: Number(v.visit_concept_id),
+        visit_source_value: v.visit_concept_name || v.visit_source_value || 'Unknown',
+        visit_start_date: v.visit_start_date,
+        visit_end_date: v.visit_end_date || v.visit_start_date,
+        measurements: visitMeasurementMap[String(v.visit_occurrence_id)] || []
+      }));
+
+      // Use first visit's date as reference for age if available
+      const refDate = normalizedVisits.length > 0
+        ? new Date(normalizedVisits[0].visit_start_date)
+        : new Date();
+
+      return {
+        person: {
+          person_id: personId,
+          gender_source_value: person.gender_source_value || '—',
+          year_of_birth: Number(person.year_of_birth),
+          month_of_birth: Number(person.month_of_birth || 1),
+          day_of_birth: Number(person.day_of_birth || 1),
+          death_date: person.death_date || null
+        },
+        visits: normalizedVisits,
+        _age: computeAge(
+          Number(person.year_of_birth),
+          Number(person.month_of_birth || 1),
+          Number(person.day_of_birth || 1),
+          refDate
+        )
+      };
+    }
+
+    // ─── Synthea CSV Loading & Normalization ─────────────────────────────────
+    async function loadSyntheaCsv(files) {
+      const fileNames = Object.keys(files);
+      let patients = [];
+      let encounters = [];
+      let observations = [];
+
+      for (const fname of fileNames) {
+        if (!fname.endsWith('.csv')) continue;
+        const rows = await readCsvFile(files[fname]);
+        if (fname.includes('patients')) {
+          patients = rows;
+        } else if (fname.includes('encounters')) {
+          encounters = rows;
+        } else if (fname.includes('observations')) {
+          observations = rows;
+        }
+      }
+
+      if (patients.length === 0) {
+        throw new Error('No patients.csv found in the selected directory.');
+      }
+
+      const patient = patients[0];
+      const patientId = patient.Id || patient.id;
+
+      // Normalize person
+      const person = {
+        person_id: patientId,
+        gender_source_value: patient.GENDER || patient.gender || '—',
+        year_of_birth: parseInt(patient.BIRTHDATE || patient.birthdate, 10),
+        month_of_birth: parseInt((patient.BIRTHDATE || patient.birthdate || '').split('-')[1], 10) || 1,
+        day_of_birth: parseInt((patient.BIRTHDATE || patient.birthdate || '').split('-')[2], 10) || 1,
+        death_date: patient.DEATHDATE || patient.deathdate || null
+      };
+
+      // Synthesize visits from encounters
+      const filteredEncounters = encounters.filter(
+        e => (e.PATIENT || e.patient) === patientId
+      );
+
+      const visitConceptMap = {
+        'ambulatory': 9202,
+        'wellness': 9202,
+        'outpatient': 9202,
+        'emergency': 9203,
+        'urgentcare': 9203,
+        'inpatient': 9201
+      };
+
+      const encounterGroups = {};
+      filteredEncounters.forEach(e => {
+        const class_ = (e.ENCOUNTERCLASS || e.encounterclass || 'outpatient').toLowerCase();
+        const conceptId = visitConceptMap[class_] || 9202;
+        if (!encounterGroups[conceptId]) encounterGroups[conceptId] = [];
+        encounterGroups[conceptId].push(e);
+      });
+
+      let visits = [];
+      let visitId = 1;
+      Object.entries(encounterGroups).forEach(([conceptId, encs]) => {
+        encs.sort((a, b) => new Date(a.START || a.start) - new Date(b.START || b.start));
+        // Simple grouping: merge consecutive encounters within 1 day
+        let currentGroup = [];
+        encs.forEach(enc => {
+          const startDate = enc.START || enc.start;
+          if (currentGroup.length === 0) {
+            currentGroup.push(enc);
+          } else {
+            const lastEnd = currentGroup[currentGroup.length - 1].STOP ||
+                            currentGroup[currentGroup.length - 1].stop ||
+                            currentGroup[currentGroup.length - 1].START ||
+                            currentGroup[currentGroup.length - 1].start;
+            const gap = (new Date(startDate) - new Date(lastEnd)) / (1000 * 60 * 60 * 24);
+            if (gap <= 1) {
+              currentGroup.push(enc);
+            } else {
+              visits.push(buildSyntheaVisit(currentGroup, conceptId, visitId++));
+              currentGroup = [enc];
+            }
+          }
+        });
+        if (currentGroup.length > 0) {
+          visits.push(buildSyntheaVisit(currentGroup, conceptId, visitId++));
+        }
+      });
+
+      // Normalize observations to measurements grouped by visit
+      const filteredObservations = observations.filter(
+        o => (o.PATIENT || o.patient) === patientId
+      );
+
+      // Map observations to their nearest visit
+      const visitMeasurementMap = {};
+      visits.forEach(v => { visitMeasurementMap[v.visit_occurrence_id] = []; });
+
+      filteredObservations.forEach(obs => {
+        const obsDate = new Date(obs.DATE || obs.date);
+        let bestVisit = null;
+        let bestDiff = Infinity;
+        visits.forEach(v => {
+          const vStart = new Date(v.visit_start_date);
+          const diff = Math.abs(obsDate - vStart);
+          if (diff < bestDiff) {
+            bestDiff = diff;
+            bestVisit = v;
+          }
+        });
+        if (bestVisit && bestDiff < 7 * 24 * 60 * 60 * 1000) {
+          visitMeasurementMap[bestVisit.visit_occurrence_id].push({
+            measurement_id: obs.Id || obs.id || String(Math.random()),
+            measurement_concept_id: 0,
+            measurement_concept_name: obs.DESCRIPTION || obs.description || obs.CODE || obs.code || 'Unknown',
+            measurement_date: (obs.DATE || obs.date || '').split('T')[0],
+            value_as_number: obs.VALUE || obs.value || '',
+            unit_source_value: obs.UNITS || obs.units || '',
+            value_source_value: obs.VALUE || obs.value || ''
+          });
+        }
+      });
+
+      visits.forEach(v => {
+        v.measurements = visitMeasurementMap[v.visit_occurrence_id] || [];
+      });
+
+      // Sort visits descending
+      visits.sort((a, b) => new Date(b.visit_start_date) - new Date(a.visit_start_date));
+
+      const refDate = visits.length > 0 ? new Date(visits[0].visit_start_date) : new Date();
+
+      return {
+        person: person,
+        visits: visits,
+        _age: computeAge(person.year_of_birth, person.month_of_birth, person.day_of_birth, refDate)
+      };
+    }
+
+    function buildSyntheaVisit(encs, conceptId, visitId) {
+      const starts = encs.map(e => new Date(e.START || e.start)).sort((a, b) => a - b);
+      const stops = encs.map(e => new Date(e.STOP || e.stop || e.START || e.start)).sort((a, b) => b - a);
+      return {
+        visit_occurrence_id: 'syn-' + visitId,
+        visit_concept_id: conceptId,
+        visit_source_value: VISIT_CONCEPT_NAMES[conceptId] || 'Visit',
+        visit_start_date: starts[0].toISOString().split('T')[0],
+        visit_end_date: stops[0].toISOString().split('T')[0],
+        measurements: []
+      };
+    }
+
+    // ─── Radial Visualization ────────────────────────────────────────────────
+    function renderRadial() {
+      svgEl.selectAll('*').remove();
+      if (!patientData || patientData.visits.length === 0) return;
+
+      const container = document.getElementById('radial-container');
+      const width = container.clientWidth;
+      const height = container.clientHeight;
+      const cx = width / 2;
+      const cy = height / 2;
+
+      svgEl.attr('viewBox', `0 0 ${width} ${height}`);
+
+      const g = svgEl.append('g').attr('transform', `translate(${cx},${cy})`);
+
+      const visits = patientData.visits;
+      const totalVisits = visits.length;
+      const visibleStart = currentVisibleStart;
+      const visibleEnd = Math.min(visibleStart + MAX_VISIBLE_RINGS, totalVisits);
+      const visibleVisits = visits.slice(visibleStart, visibleEnd);
+      const hasMore = visibleEnd < totalVisits;
+
+      // Render rings: visibleVisits[0] is most recent (sorted desc),
+      // innermost ring (smallest radius) = most recent.
+      visibleVisits.forEach((visit, i) => {
+        const ringIndex = i + 1;
+        const radius = CENTER_RADIUS + ringIndex * RING_SPACING;
+        const visitColor = getVisitColor(visit.visit_concept_id);
+
+        // Ring background
+        g.append('circle')
+          .attr('cx', 0)
+          .attr('cy', 0)
+          .attr('r', radius)
+          .attr('fill', 'none')
+          .attr('stroke', visitColor)
+          .attr('stroke-width', 1.5)
+          .attr('stroke-opacity', 0.35)
+          .attr('data-ring-id', visit.visit_occurrence_id)
+          .style('cursor', 'pointer')
+          .on('click', function (event) {
+            event.stopPropagation();
+            highlightVisit(visit.visit_occurrence_id);
+          });
+
+        // Visit label
+        g.append('text')
+          .attr('x', 0)
+          .attr('y', -radius - 6)
+          .attr('text-anchor', 'middle')
+          .attr('font-size', '9px')
+          .attr('fill', '#6a737d')
+          .attr('pointer-events', 'none')
+          .text(formatDate(visit.visit_start_date) + ' · ' + truncate(visit.visit_source_value, 18));
+
+        // Measurement nodes
+        const measurements = visit.measurements;
+        if (measurements.length > 0) {
+          const angleStep = (2 * Math.PI) / measurements.length;
+          measurements.forEach((m, j) => {
+            const angle = angleStep * j - Math.PI / 2;
+            const nx = radius * Math.cos(angle);
+            const ny = radius * Math.sin(angle);
+            const color = getConceptColor(m.measurement_concept_id);
+
+            const node = g.append('circle')
+              .attr('cx', nx)
+              .attr('cy', ny)
+              .attr('r', NODE_RADIUS)
+              .attr('fill', color)
+              .attr('stroke', '#fff')
+              .attr('stroke-width', 1.5)
+              .style('cursor', 'pointer')
+              .style('transition', 'r 0.2s ease')
+              .attr('data-visit-id', visit.visit_occurrence_id)
+              .attr('data-measurement-id', m.measurement_id)
+              .on('click', function (event) {
+                event.stopPropagation();
+                expandNode(m, visit, d3.select(this), cx, cy, radius, angle);
+              })
+              .on('mouseenter', function () {
+                d3.select(this).attr('r', NODE_RADIUS + 2);
+              })
+              .on('mouseleave', function () {
+                if (expandedNode && expandedNode.measurement_id === m.measurement_id) return;
+                d3.select(this).attr('r', NODE_RADIUS);
+              });
+          });
+        }
+      });
+
+      // Scroll ring
+      if (hasMore) {
+        const scrollRadius = CENTER_RADIUS + (visibleVisits.length + 1) * RING_SPACING;
+        g.append('circle')
+          .attr('cx', 0)
+          .attr('cy', 0)
+          .attr('r', scrollRadius)
+          .attr('fill', 'none')
+          .attr('stroke', '#aab0b8')
+          .attr('stroke-width', 1.5)
+          .attr('stroke-dasharray', '6,4')
+          .style('cursor', 'pointer')
+          .on('click', function () {
+            currentVisibleStart = Math.min(currentVisibleStart + MAX_VISIBLE_RINGS, totalVisits - MAX_VISIBLE_RINGS);
+            if (currentVisibleStart < 0) currentVisibleStart = 0;
+            collapseNode();
+            renderRadial();
+          });
+
+        g.append('text')
+          .attr('class', 'scroll-ring-label')
+          .attr('x', 0)
+          .attr('y', -scrollRadius)
+          .text('+');
+      }
+
+      // Scroll inward indicator
+      if (visibleStart > 0) {
+        const innerScrollRadius = CENTER_RADIUS + RING_SPACING * 0.5;
+        g.append('circle')
+          .attr('cx', 0)
+          .attr('cy', 0)
+          .attr('r', innerScrollRadius)
+          .attr('fill', 'none')
+          .attr('stroke', '#aab0b8')
+          .attr('stroke-width', 1)
+          .attr('stroke-dasharray', '3,3')
+          .style('cursor', 'pointer')
+          .on('click', function () {
+            currentVisibleStart = Math.max(0, currentVisibleStart - MAX_VISIBLE_RINGS);
+            collapseNode();
+            renderRadial();
+          });
+
+        g.append('text')
+          .attr('x', 0)
+          .attr('y', -innerScrollRadius)
+          .attr('text-anchor', 'middle')
+          .attr('dominant-baseline', 'central')
+          .attr('font-size', '10px')
+          .attr('fill', '#aab0b8')
+          .attr('pointer-events', 'none')
+          .text('−');
+      }
+
+      // Center node
+      g.append('circle')
+        .attr('cx', 0)
+        .attr('cy', 0)
+        .attr('r', CENTER_RADIUS)
+        .attr('fill', '#fff')
+        .attr('stroke', ACCENT_COLOR)
+        .attr('stroke-width', 2);
+
+      const person = patientData.person;
+      const gender = person.gender_source_value === 'F' ? '♀' :
+                     person.gender_source_value === 'M' ? '♂' : person.gender_source_value;
+      const age = patientData._age;
+
+      g.append('text')
+        .attr('x', 0)
+        .attr('y', -8)
+        .attr('text-anchor', 'middle')
+        .attr('font-size', '11px')
+        .attr('font-weight', '600')
+        .attr('fill', '#1f2328')
+        .text('ID ' + person.person_id);
+
+      g.append('text')
+        .attr('x', 0)
+        .attr('y', 6)
+        .attr('text-anchor', 'middle')
+        .attr('font-size', '10px')
+        .attr('fill', '#6a737d')
+        .text(gender + ' ' + age + 'y');
+
+      if (person.death_date) {
+        const ageAtDeath = computeAge(person.year_of_birth, person.month_of_birth, person.day_of_birth, new Date(person.death_date));
+        g.append('text')
+          .attr('x', 0)
+          .attr('y', 18)
+          .attr('text-anchor', 'middle')
+          .attr('font-size', '9px')
+          .attr('fill', '#d4504e')
+          .attr('font-weight', '500')
+          .text('Décédé(e) · ' + ageAtDeath + 'y');
+      }
+    }
+
+    // ─── Timeline ────────────────────────────────────────────────────────────
+    function renderTimeline() {
+      timelineEl.innerHTML = '';
+      if (!patientData || patientData.visits.length === 0) {
+        timelineEl.innerHTML = '<div class="timeline-empty">No measurements to display.</div>';
+        return;
+      }
+
+      // Collect all measurements across visits, sorted antéchronologically
+      const allMeasurements = [];
+      patientData.visits.forEach(v => {
+        v.measurements.forEach(m => {
+          allMeasurements.push({
+            ...m,
+            _visitId: v.visit_occurrence_id,
+            _visitConceptId: v.visit_concept_id,
+            _visitStartDate: v.visit_start_date,
+            _visitSourceValue: v.visit_source_value
+          });
+        });
+      });
+
+      // Sort by date descending
+      allMeasurements.sort((a, b) => new Date(b.measurement_date) - new Date(a.measurement_date));
+
+      // Render entries
+      allMeasurements.forEach(m => {
+        const entry = document.createElement('div');
+        entry.className = 'timeline-entry';
+        entry.setAttribute('data-measurement-id', m.measurement_id);
+        entry.setAttribute('data-visit-id', m._visitId);
+
+        const barColor = getVisitColor(m._visitConceptId);
+        entry.style.borderLeftColor = barColor;
+
+        const valueStr = m.value_as_number
+          ? m.value_as_number + (m.unit_source_value ? ' ' + m.unit_source_value : '')
+          : m.value_source_value || '—';
+
+        entry.innerHTML =
+          '<div class="concept-name" title="' + escapeHtml(m.measurement_concept_name) + '">' +
+            escapeHtml(truncate(m.measurement_concept_name, 40)) +
+          '</div>' +
+          '<div class="value-unit">' + escapeHtml(valueStr) + '</div>' +
+          '<div class="date">' + formatDate(m.measurement_date) + '</div>';
+
+        entry.addEventListener('click', function () {
+          highlightMeasurement(m.measurement_id, m._visitId);
+        });
+
+        timelineEl.appendChild(entry);
+      });
+
+      // Concept legend
+      const uniqueConcepts = {};
+      allMeasurements.forEach(m => {
+        if (!uniqueConcepts[m.measurement_concept_id]) {
+          uniqueConcepts[m.measurement_concept_id] = m.measurement_concept_name;
+        }
+      });
+
+      if (Object.keys(uniqueConcepts).length > 1) {
+        const legend = document.createElement('div');
+        legend.className = 'concept-legend';
+        legend.innerHTML = '<div class="concept-legend-title">Concepts</div>';
+        Object.entries(uniqueConcepts).forEach(([id, name]) => {
+          const item = document.createElement('div');
+          item.className = 'concept-legend-item';
+          item.innerHTML =
+            '<span class="concept-legend-swatch" style="background:' + getConceptColor(id) + '"></span>' +
+            '<span>' + escapeHtml(truncate(name, 32)) + '</span>';
+          legend.appendChild(item);
+        });
+        timelineEl.appendChild(legend);
+      }
+    }
+
+    function escapeHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
+    // ─── Interaction: Highlighting ───────────────────────────────────────────
+    function highlightVisit(visitId) {
+      if (highlightedVisitId === visitId) {
+        clearHighlights();
+        return;
+      }
+      clearHighlights();
+      highlightedVisitId = visitId;
+
+      // Highlight ring nodes
+      svgEl.selectAll('circle[data-visit-id="' + visitId + '"]')
+          .attr('stroke', ACCENT_COLOR)
+        .attr('stroke-width', 2.5);
+
+      // Emphasize the ring itself
+      svgEl.selectAll('circle[data-ring-id="' + visitId + '"]')
+        .attr('stroke-opacity', 1)
+        .attr('stroke-width', 3);
+
+      // Highlight timeline entries
+      const entries = timelineEl.querySelectorAll('[data-visit-id="' + visitId + '"]');
+      entries.forEach(e => {
+        e.classList.add('highlighted');
+        if (entries[0] === e) {
+          e.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+      });
+    }
+
+    function highlightMeasurement(measurementId, visitId) {
+      clearHighlights();
+      highlightedMeasurementId = measurementId;
+
+      // Highlight node
+      const node = svgEl.select('circle[data-measurement-id="' + measurementId + '"]');
+      if (!node.empty()) {
+        node.attr('stroke', ACCENT_COLOR).attr('stroke-width', 3);
+        // Also highlight the parent visit ring lightly
+        svgEl.selectAll('circle[data-visit-id="' + visitId + '"]')
+          .filter(function () { return d3.select(this).attr('data-measurement-id') !== measurementId; })
+        .attr('stroke', ACCENT_COLOR)
+          .attr('stroke-width', 1.5)
+          .attr('stroke-opacity', 0.5);
+      }
+
+      // Highlight timeline entry
+      const entry = timelineEl.querySelector('[data-measurement-id="' + measurementId + '"]');
+      if (entry) {
+        entry.classList.add('highlighted');
+        entry.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
+    }
+
+    function clearHighlights() {
+      highlightedVisitId = null;
+      highlightedMeasurementId = null;
+
+      svgEl.selectAll('circle[data-visit-id]')
+        .attr('stroke', '#fff')
+        .attr('stroke-width', 1.5)
+        .attr('stroke-opacity', 1);
+
+      // Reset ring emphasis back to its visit type color
+      svgEl.selectAll('circle[data-ring-id]')
+        .each(function () {
+          const el = d3.select(this);
+          const vid = el.attr('data-ring-id');
+          const visit = (patientData.visits || []).find(v => v.visit_occurrence_id === vid);
+          if (visit) {
+            el.attr('stroke', getVisitColor(visit.visit_concept_id))
+              .attr('stroke-width', 1.5)
+              .attr('stroke-opacity', 0.35);
+          }
+        });
+
+      timelineEl.querySelectorAll('.timeline-entry.highlighted').forEach(e => {
+        e.classList.remove('highlighted');
+      });
+    }
+
+    // ─── Interaction: Node Expansion ─────────────────────────────────────────
+    function expandNode(measurement, visit, nodeSelection, cx, cy, radius, angle) {
+      if (expandedNode && expandedNode.measurement_id === measurement.measurement_id) {
+        collapseNode();
+        return;
+      }
+
+      collapseNode();
+      expandedNode = measurement;
+
+      // Enlarge node
+      nodeSelection.attr('r', NODE_RADIUS + 3);
+
+      // Calculate panel position in SVG coordinates, then convert to page coords
+      const nx = cx + radius * Math.cos(angle);
+      const ny = cy + radius * Math.sin(angle);
+
+      const svgRect = document.getElementById(SVG_ID).getBoundingClientRect();
+      const containerRect = document.getElementById('radial-container').getBoundingClientRect();
+
+      const panelX = nx + svgRect.left - containerRect.left + 12;
+      const panelY = ny + svgRect.top - containerRect.top - 20;
+
+      const valueStr = measurement.value_as_number
+        ? measurement.value_as_number + (measurement.unit_source_value ? ' ' + measurement.unit_source_value : '')
+        : measurement.value_source_value || '—';
+
+      infoEl.innerHTML =
+        '<div class="info-concept">' + escapeHtml(measurement.measurement_concept_name) + '</div>' +
+        '<div class="info-row"><span>Value</span><span>' + escapeHtml(valueStr) + '</span></div>' +
+        '<div class="info-row"><span>Date</span><span>' + formatDate(measurement.measurement_date) + '</span></div>' +
+        '<div class="info-row"><span>Visit</span><span>' + escapeHtml(truncate(visit.visit_source_value, 24)) + ' (' + formatDate(visit.visit_start_date) + ')</span></div>';
+
+      // Position panel
+      infoEl.style.left = Math.max(0, Math.min(panelX, containerRect.width - 290)) + 'px';
+      infoEl.style.top = Math.max(0, Math.min(panelY, containerRect.height - 120)) + 'px';
+
+      requestAnimationFrame(function () {
+        infoEl.classList.add('visible');
+      });
+    }
+
+    function collapseNode() {
+      if (!expandedNode) return;
+      expandedNode = null;
+
+      // Reset all node radii
+      svgEl.selectAll('circle[data-measurement-id]').attr('r', NODE_RADIUS);
+      infoEl.classList.remove('visible');
+    }
+
+    // ─── Click Outside to Collapse ───────────────────────────────────────────
+    document.getElementById(SVG_ID).addEventListener('click', function (e) {
+      if (e.target === this || e.target.tagName === 'svg') {
+        collapseNode();
+        clearHighlights();
+      }
+    });
+
+    // ─── Main Entry Point ────────────────────────────────────────────────────
+    loadBtn.addEventListener('click', async function () {
+      try {
+        if (!('showDirectoryPicker' in window)) {
+          setStatus('Error: showDirectoryPicker not supported. Use Chrome/Edge.');
+          return;
+        }
+
+        const dirHandle = await window.showDirectoryPicker({ mode: 'read' });
+        setStatus('Loading…');
+
+        const files = await loadDirectory(dirHandle);
+        const format = await detectFormat(files);
+
+        if (!format) {
+          setStatus('Error: No recognizable OMOP files found.');
+          return;
+        }
+
+        if (format === 'omop-json') {
+          patientData = await loadOmopJson(files);
+        } else {
+          patientData = await loadSyntheaCsv(files);
+        }
+
+        conceptColorMap = {};
+        colorIndex = 0;
+        currentVisibleStart = 0;
+
+        // Compute colors for all concepts upfront
+        patientData.visits.forEach(v => {
+          v.measurements.forEach(m => {
+            getConceptColor(m.measurement_concept_id);
+          });
+        });
+
+        renderTimeline();
+        renderRadial();
+
+        const totalMeasurements = patientData.visits.reduce((sum, v) => sum + v.measurements.length, 0);
+        setStatus(
+          'Patient ' + patientData.person.person_id +
+          ' · ' + patientData.visits.length + ' visits' +
+          ' · ' + totalMeasurements + ' measurements'
+        );
+
+      } catch (err) {
+        if (err.name === 'AbortError') return;
+        setStatus('Error: ' + err.message);
+        console.error(err);
+      }
+    });
+
+    // ─── Window Resize ───────────────────────────────────────────────────────
+    window.addEventListener('resize', function () {
+      if (patientData) {
+        collapseNode();
+        renderRadial();
+      }
+    });
+
+    // ─── Init ────────────────────────────────────────────────────────────────
+    if (window.showDirectoryPicker) {
+      setStatus('Ready. Click "Load patient data" to begin.');
+    } else {
+      setStatus('showDirectoryPicker not supported. Use Chrome/Edge for directory loading.');
+    }
+  })();
   </script>
 </body>
 </html>
